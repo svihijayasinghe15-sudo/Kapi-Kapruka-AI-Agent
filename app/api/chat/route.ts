@@ -1,65 +1,57 @@
-// app/api/chat/route.ts
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { NextResponse } from 'next/server';
-import { processAssistantResponse } from '@/lib/conversation-engine';
-import { KaprukaMcpClient } from '@/lib/kapruka-mcp';
-import { ShoppingContext } from '@/types/chat';
 
-// Initialize your Kapruka client securely on the server side
-const kaprukaClient = new KaprukaMcpClient();
-
-export async function POST(request: Request) {
-    let context: ShoppingContext = {};
-
+export async function POST(req: Request) {
     try {
-        const body = await request.json();
-        const { message, history } = body;
+        const { messages } = await req.json();
+        const lastMessage = messages[messages.length - 1].content;
 
-        // Retain and track the incoming chat session context
-        if (body.context) {
-            context = body.context;
-        }
+        // Gather all 4 available keys (1 Primary + 3 Free Backups)
+        const keys = [
+            process.env.GEMINI_API_KEY,
+            process.env.GEMINI_API_KEY_BACKUP_1,
+            process.env.GEMINI_API_KEY_BACKUP_2,
+            process.env.GEMINI_API_KEY_BACKUP_3
+        ].filter(Boolean); // Cleanly removes any keys that aren't set yet
 
-        if (!message || !message.trim()) {
-            return NextResponse.json({ error: 'Message is required' }, { status: 400 });
-        }
+        let responseText = "";
+        let success = false;
+        let lastError = null;
 
-        // Convert frontend chat tracking arrays into the explicit structure the Gemini SDK expects
-        const geminiHistory = (history || []).map((msg: any) => ({
-            role: msg.role === 'assistant' ? ('model' as const) : ('user' as const),
-            parts: [{ text: msg.content }]
-        }));
+        // Loop through the keys until one successfully answers
+        for (let i = 0; i < keys.length; i++) {
+            try {
+                console.log(`Trying Gemini API Key Option #${i + 1}...`);
 
-        // Execute your high-energy, trilingual conversational engine
-        const aiResponse = await processAssistantResponse(
-            message,
-            context,
-            kaprukaClient,
-            geminiHistory
-        );
+                const genAI = new GoogleGenerativeAI(keys[i]!);
+                const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-        // 🛡️ THE BULLETPROOF GUARDRAIL
-        // If the user has set a budget limit, filter the real product search results
-        if (context.budget && aiResponse.products) {
-            const budgetCeiling = Number(context.budget);
-            if (!isNaN(budgetCeiling)) {
-                // If an item from the inventory is even 1 Rupee over the budget, drop it instantly!
-                aiResponse.products = aiResponse.products.filter(
-                    (product: any) => product.price <= budgetCeiling
-                );
+                const result = await model.generateContent(lastMessage);
+                responseText = result.response.text();
+
+                success = true;
+                break; // Success! Break out of the loop early
+            } catch (error: any) {
+                lastError = error;
+                // If it's a rate limit error (429), log a warning and let the loop try the next key
+                if (error.status === 429 || error.message?.includes('429')) {
+                    console.warn(`Key #${i + 1} rate limited. Swapping to next backup...`);
+                    continue;
+                }
+                throw error; // Pass along any real coding or syntax syntax errors immediately
             }
         }
 
-        // Send the clean text response and filtered product cards back to page.tsx
-        return NextResponse.json(aiResponse);
+        if (!success) {
+            throw lastError || new Error("All backup API keys are currently exhausted.");
+        }
 
-    } catch (error) {
-        console.error("CRITICAL ROUTE ERROR:", error);
+        return NextResponse.json({ text: responseText });
+
+    } catch (error: any) {
+        console.error("Final Chat API Failure:", error);
         return NextResponse.json(
-            {
-                reply: "Aiyo, behind the scenes podi prashnayak! 😱 Let's try that turn again, machan. 🙌",
-                updatedContext: context,
-                quickReplies: ['Try again 🔄', 'Reset Chat 🛒']
-            },
+            { error: "Engine temporary cooldown. Please try again in a moment." },
             { status: 500 }
         );
     }
