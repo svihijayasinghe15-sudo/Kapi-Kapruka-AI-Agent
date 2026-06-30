@@ -153,6 +153,10 @@ export class KaprukaMcpClient {
         if (productId) params.product_id = productId;
         return this.callTool('kapruka_check_delivery', params);
     }
+
+    async trackOrder(options: { order_number: string }): Promise<string> {
+        return this.callTool('kapruka_track_order', { order_number: options.order_number });
+    }
 }
 
 let sharedClient: KaprukaMcpClient | null = null;
